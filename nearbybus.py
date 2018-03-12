@@ -13,12 +13,6 @@ def latlon_bbox(latlon, miles):
 	dlon = math.degrees(miles / r)
 	return (lat - dlat, lon - dlon), (lat + dlat, lon + dlon)
 
-def change_in_longitude(latitude, miles):
-    "Given a latitude and a distance west, return the change in longitude."
-    # Find the radius of a circle around the earth at given latitude.
-    r = earth_radius*math.cos(latitude*degrees_to_radians)
-    return (miles/r)*radians_to_degrees
-
 def get_latlon(address):
 	# TODO proper quoting
 	addr_escaped = address.replace(" ", "%20")
@@ -53,16 +47,59 @@ def query_route_stops(r):
 	js = response.read().decode('utf8', 'ignore')
 	return js
 
+default_yelp_categories = [
+	"active",
+	"arts",
+	"beautysvc",
+	"food",
+	"localflavor",
+	"nightlife",
+	"restaurants",
+	"shopping",
+]
+
 def query_yelp_near(latlon, radius_miles):
-	radius_meters = int(1609 * radius_miles)
-	url = "https://api.yelp.com/v3/businesses/search?latitude={}&longitude={}&radius={}".format(
-		latlon[0], latlon[1], radius_meters)
+	meters = int(1609 * radius_miles)
+
+	params = [
+		"latitude=" + str(latlon[0]),
+		"longitude=" + str(latlon[1]),
+		"radius=" + str(meters),
+		"categories=" + ",".join(default_yelp_categories),
+		"limit=50",
+		"price=1,2,3", # no $$$$
+		"sort_by=rating",
+	]
+
+	url_base = "https://api.yelp.com/v3/businesses/search?" + "&".join(params)
+
 	import private
 	key = private.yelp_key
-	req = urllib.request.Request(url, headers={'Authorization': 'Bearer %s' % key})
-	response = urllib.request.urlopen(req)
-	js = response.read().decode('utf8', 'ignore')
-	return js
+
+	print("querying latlon", latlon)
+	places = []
+	total = None
+	while total is None or len(places) < total:
+		url = url_base + "&offset=" + str(len(places))
+		req = urllib.request.Request(url, headers={'Authorization': 'Bearer %s' % key})
+		response = urllib.request.urlopen(req)
+		js = json.loads(response.read().decode('utf8', 'ignore'))
+		if total is None:
+			total = js["total"]
+			print("total:", total)
+			if total > 1000:
+				total = 1000
+				print("cutting off at 1000 due to Yelp API limits")
+		bizs = js["businesses"]
+		for b in bizs:
+			stars = float(b["rating"])
+			if stars < 3:
+				print("cutting off places below 3 stars")
+				total = 0 # break
+		places.extend(bizs)
+
+	print("(stopped at {} places)".format(len(places)))
+	return places
 
 walk_radius = 0.5
 
@@ -108,8 +145,8 @@ def get_dev_pois():
 			lon, lat = s["geometry"]["coordinates"]
 			latlon = (float(lat), float(lon))
 			pois = query_yelp_near(latlon, walk_radius)
-			pois = json.loads(pois)
 			stop_pois.append({"stop": s, "pois": pois})
+			print("stop {}: {} places".format(s["name"], len(pois)))
 		js = json.dumps(stop_pois)
 		with open(path, "w") as f:
 			f.write(js)
@@ -120,14 +157,39 @@ def get_dev_pois():
 			js = f.read()
 			return js
 
-stop_pois = json.loads(get_dev_pois())
-for stop in stop_pois:
-	s = stop["stop"]
-	pois = stop["pois"]
-	print()
-	print()
-	print(s["name"])
-	print("-----------")
-	# TODO iterate thru everything in yelp request
-	for b in pois["businesses"]:
-		print(b["name"])
+def category_parents():
+	with open("categories.json") as f:
+		cats = json.load(f)
+		d = {}
+		for c in cats:
+			name = c["alias"]
+			d[c["alias"]] = c["parents"]
+		return d
+
+catpar = category_parents()
+
+def is_food(categories):
+	for c in categories:
+		a = c["alias"]
+		if (a == "food" or a == "restaurants"
+			or "food" in catpar[a] or "restaurants" in catpar[a]):
+			return True
+	return False
+
+def main():
+	stop_pois = json.loads(get_dev_pois())
+	for stop in stop_pois:
+		s = stop["stop"]
+		pois = stop["pois"]
+		print()
+		print()
+		print(s["name"])
+		print("-----------")
+		# TODO iterate thru everything in yelp request
+		print("food/restaurant:")
+		print("-----------")
+		for b in pois:
+			if is_food(b["categories"]):
+				print(b["name"])
+
+main()
